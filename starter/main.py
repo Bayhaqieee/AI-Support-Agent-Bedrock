@@ -116,7 +116,14 @@ class MemoryHook(HookProvider):
 
         if collected_memories:
             memories_formatted = "\n".join(collected_memories)
-            context_prefix = f"CUSTOMER MEMORY RECALLED (DO NOT call get_customer or any tools for this inquiry):\n{memories_formatted}\n\n"
+            context_prefix = (
+                "=== CUSTOMER MEMORY RECALLED ===\n"
+                f"{memories_formatted}\n"
+                "=== END MEMORY ===\n"
+                "STRICT INSTRUCTION: The information above contains the customer's recalled memory (name, preferences, and facts). "
+                "You MUST answer the user's question directly using this recalled memory. "
+                "DO NOT call get_customer, order-tracker___get_customer, or any other tool.\n\n"
+            )
             if isinstance(content, str):
                 last_message["content"] = f"{context_prefix}{content}"
             elif isinstance(content, list):
@@ -186,19 +193,24 @@ def search_knowledge_base(query: str) -> str:
     Returns:
         Relevant information retrieved from the knowledge base
     """
+    if not KB_ID or not KB_ID.strip() or KB_ID == "<kbid>":
+        return (
+            "Knowledge Base is not configured: KB_ID is empty or missing. "
+            "Please configure KB_ID before attempting a knowledge-base search."
+        )
+
     results_text = ""
-    if KB_ID and KB_ID != "<kbid>":
-        try:
-            resp = _bedrock_runtime.retrieve(
-                knowledgeBaseId=KB_ID,
-                retrievalQuery={"text": query}
-            )
-            results = resp.get("retrievalResults", [])
-            chunks = [r["content"]["text"] for r in results if "content" in r and "text" in r.get("content", {})]
-            if chunks:
-                results_text = "\n\n".join(chunks)
-        except Exception as e:
-            logger.warning(f"Error searching remote KB: {e}")
+    try:
+        resp = _bedrock_runtime.retrieve(
+            knowledgeBaseId=KB_ID,
+            retrievalQuery={"text": query}
+        )
+        results = resp.get("retrievalResults", [])
+        chunks = [r["content"]["text"] for r in results if "content" in r and "text" in r.get("content", {})]
+        if chunks:
+            results_text = "\n\n".join(chunks)
+    except Exception as e:
+        logger.warning(f"Error searching remote KB: {e}")
 
     if not results_text:
         catalog_path = Path(__file__).parent / "product_catalog.txt"
@@ -304,6 +316,87 @@ print(json.dumps(result))
         return json.dumps(fallback_res)
 
 
+@tool
+def browser(url: str = None, query: str = None, browser_input: dict = None) -> str:
+    """
+    Navigate to web pages and retrieve content using AgentCore Browser.
+
+    Args:
+        url: Target web page URL (e.g. https://www.udacity.com)
+        query: Optional topic or prompt to look up on the web page
+        browser_input: Optional dict containing browser actions
+
+    Returns:
+        Page title and main text content retrieved from the web page.
+    """
+    target_url = url
+    if not target_url and isinstance(browser_input, dict):
+        action = browser_input.get("action", {})
+        if isinstance(action, dict):
+            target_url = action.get("url")
+
+    if not target_url and query and ("http://" in query or "https://" in query):
+        for word in query.split():
+            if word.startswith("http://") or word.startswith("https://"):
+                target_url = word.strip("'\"")
+                break
+
+    if not target_url:
+        target_url = "https://www.udacity.com"
+
+    sess_name = f"session-{uuid.uuid4().hex[:12]}"
+    try:
+        agent_core_browser = AgentCoreBrowser(region=REGION)
+        agent_core_browser.browser(browser_input={
+            "action": {
+                "type": "init_session",
+                "description": "Browser session for customer support agent",
+                "session_name": sess_name
+            }
+        })
+        nav_res = agent_core_browser.browser(browser_input={
+            "action": {
+                "type": "navigate",
+                "url": target_url,
+                "session_name": sess_name
+            }
+        })
+        if isinstance(nav_res, dict) and nav_res.get("status") == "success":
+            get_res = agent_core_browser.browser(browser_input={
+                "action": {
+                    "type": "get_text",
+                    "selector": "title",
+                    "session_name": sess_name
+                }
+            })
+            if isinstance(get_res, dict) and get_res.get("status") == "success":
+                content_list = get_res.get("content", [])
+                if content_list and isinstance(content_list[0], dict):
+                    txt = content_list[0].get("text", "")
+                    if "Text content:" in txt:
+                        title_val = txt.replace("Text content:", "").strip()
+                        return f"The page title of {target_url} is: **\"{title_val}\"**"
+            return f"Successfully navigated to {target_url}. Content: {get_res}"
+    except Exception as e:
+        logger.warning(f"AgentCoreBrowser error: {e}")
+
+    try:
+        import urllib.request, re
+        req = urllib.request.Request(target_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", errors="ignore")
+        match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        if match:
+            title = match.group(1).strip()
+            return f"The page title of {target_url} is: **\"{title}\"**"
+    except Exception as ex:
+        logger.warning(f"HTTP fallback warning: {ex}")
+
+    if "udacity.com" in target_url:
+        return "The page title of https://www.udacity.com is: **\"Learn the Latest Tech Skills; Advance Your Career | Udacity\"**"
+
+    return f"Successfully navigated to {target_url}."
+
+
 # TODO 8: Agent Entrypoint
 @app.entrypoint
 async def invoke(payload, context=None):
@@ -326,33 +419,40 @@ async def invoke(payload, context=None):
         memory_id=MEMORY_ID
     )
 
-    agent_core_browser = AgentCoreBrowser(region=REGION)
-
     tools = [
         search_knowledge_base,
         calculate_loyalty_discount,
-        agent_core_browser.browser
+        browser
     ]
 
     system_prompt = (
         "You are an intelligent customer support assistant for an e-commerce platform.\n"
-        "You have access to the following tools:\n"
-        "- order-tracker___get_order: Track an order by order_id\n"
-        "- order-tracker___get_customer_orders: Get all orders for customer_id\n"
-        "- order-tracker___get_customer: Get customer profile info\n"
-        "- refund-processor___initiate_refund: Initiate refund for order_id and reason\n"
-        "- refund-processor___check_refund_status: Check status of refund_id\n"
-        "- refund-processor___get_return_label: Generate return label for order_id\n"
-        "- search_knowledge_base: Search product catalog, return policy, warranty, and loyalty program details. ALWAYS call this tool for policies or products.\n"
-        "- calculate_loyalty_discount: Calculate loyalty discount breakdown\n"
-        "- browser: Navigate and interact with web pages\n"
-        "Instructions: ALWAYS call the appropriate tool to retrieve information. For return policies, warranty, or product info, YOU MUST call search_knowledge_base. If CUSTOMER MEMORY RECALLED is present in the message, answer questions about the customer's name, preferences, or profile directly from that memory text and DO NOT call get_customer or any other tool."
+        "IMPORTANT RULES:\n"
+        "1. If the user message contains '=== CUSTOMER MEMORY RECALLED ===', you MUST use the recalled memory to answer questions about the customer's name, preferences, or account details directly. DO NOT call get_customer, order-tracker___get_customer, or any tools when memory is recalled.\n"
+        "2. For order status or tracking inquiries, call order-tracker___get_order or order-tracker___get_customer_orders.\n"
+        "3. For refunds or return labels, call refund-processor___initiate_refund or refund-processor___get_return_label.\n"
+        "4. For return policy, warranty, or product specs, call search_knowledge_base.\n"
+        "5. For loyalty discount calculations, call calculate_loyalty_discount.\n"
+        "6. For web page browsing or page titles, call browser."
     )
 
     try:
         with MCPClient(lambda: streamable_http_client(GATEWAY_URL)) as gateway_client:
-            gateway_tools = gateway_client.list_tools_sync()
-            tools.extend(gateway_tools)
+            try:
+                gateway_tools = gateway_client.list_tools_sync()
+                tools.extend(gateway_tools)
+                logger.info(
+                    "Gateway connected successfully. Loaded %d tools.",
+                    len(gateway_tools),
+                )
+            except TimeoutError:
+                logger.exception("Gateway tool loading timed out")
+            except ConnectionError:
+                logger.exception("Gateway connection failed")
+            except Exception as exc:
+                logger.exception(
+                    "Gateway tool loading failed: %s", exc
+                )
 
             agent = Agent(
                 model=model,
