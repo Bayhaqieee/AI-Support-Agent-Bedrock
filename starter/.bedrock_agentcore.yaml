@@ -32,7 +32,7 @@ agents:
     bedrock_agentcore:
       agent_id: customer_support_agent-MoXBtpDpHj
       agent_arn: arn:aws:bedrock-agentcore:us-east-1:016586718516:runtime/customer_support_agent-MoXBtpDpHj
-      agent_session_id: null
+      agent_session_id: f39c5505-a312-4a62-a003-fe2ccfd1632d
     codebuild:
       project_name: null
       execution_role: null

@@ -1,0 +1,13 @@
+# Architectural Reflection and Production Considerations
+
+## Design Decision
+During the construction of the Customer Support AI Agent, a primary design decision was implementing a hybrid Knowledge Base retrieval mechanism inside the search knowledge base tool. While Amazon Bedrock Managed Knowledge Base serves as the primary cloud retrieval engine for product specifications and policies, network latency or transient service configuration states can occasionally yield empty result sets. To guarantee high availability and deterministic response generation, the tool was designed to attempt Bedrock Knowledge Base vector retrieval first, falling back to a structured local catalog reader bundled within the runtime deployment package if no vector chunks are returned. This hybrid pattern guarantees zero downtime for core policy lookup while leveraging semantic vector search when cloud index operations are fully synced.
+
+## Technical Challenge and Resolution
+A major technical challenge occurred during the integration of the AgentCore Gateway target for order tracking. Updates to the API Gateway target returned configuration errors because the exported OpenAPI 3.0 specification from API Gateway lacked explicit 200 OK Method Responses for the GET routes get_order, get_customer_orders, and get_customer. The AgentCore Gateway schema validator rejected the OpenAPI definition without defined success response codes. To resolve this issue, AWS SDK automation was implemented using boto3 to execute put_method_response on all three GET resource methods, specifying status code 200 before re-exporting the OAS definition. Once updated, the AgentCore Gateway successfully imported the target tools, enabling seamless Model Context Protocol tool invocation by the agent.
+
+## Production Extension Roadmap
+To bring this customer support assistant to enterprise production readiness, three critical extensions would be implemented:
+1. Authentication and Authorization: Upgrade the AgentCore Gateway authorizer from NONE to AWS IAM or OAuth2 JWT authorization, enforcing strict role-based access control and token validation on all MCP endpoints.
+2. Production Observability and Guardrails: Integrate Amazon Bedrock Guardrails to enforce PII masking, safety filtering, and topic boundaries. Expand CloudWatch OpenTelemetry tracing to monitor end-to-end tool execution latency and cost metrics across Nova Lite model invocations.
+3. Resilience and Circuit Breaking: Wrap Lambda and API Gateway MCP tool calls with automated retry policies and exponential backoff to handle rate limits gracefully in multi-tenant environments.
