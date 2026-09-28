@@ -133,7 +133,14 @@ class MemoryHook(HookProvider):
                         break
 
     def save_support_interaction(self, event: AfterInvocationEvent):
-        """Save the completed turn to memory after the agent responds."""
+        """Save the completed turn to memory after the agent responds.
+
+        Extracts the latest plain-text customer query and the corresponding
+        plain-text assistant answer, then persists them as a memory event.
+        Tool-result messages (role=user, type=tool_result) and tool-call
+        blocks (role=assistant, type=tool_use) are explicitly excluded so
+        that only the real human query and the final text reply are stored.
+        """
         messages = event.agent.messages
         if not messages:
             return
@@ -144,18 +151,41 @@ class MemoryHook(HookProvider):
         for msg in reversed(messages):
             role = msg.get("role")
             content = msg.get("content")
+
             if not agent_response and role == "assistant":
-                if isinstance(content, str):
-                    agent_response = content
+                # Only accept plain-text blocks; skip tool_use call blocks
+                if isinstance(content, str) and content.strip():
+                    agent_response = content.strip()
                 elif isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and "text" in b]
+                    texts = [
+                        b.get("text", "").strip()
+                        for b in content
+                        if isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                    ]
                     if texts:
                         agent_response = " ".join(texts)
+
             elif not customer_query and role == "user":
-                if isinstance(content, str):
-                    customer_query = content
+                if isinstance(content, str) and content.strip():
+                    # Plain-text string: always the real customer query
+                    customer_query = content.strip()
                 elif isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and "text" in b]
+                    # Skip messages whose content is entirely tool_result blocks
+                    has_tool_result = any(
+                        isinstance(b, dict) and b.get("type") == "tool_result"
+                        for b in content
+                    )
+                    if has_tool_result:
+                        continue
+                    texts = [
+                        b.get("text", "").strip()
+                        for b in content
+                        if isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                    ]
                     if texts:
                         customer_query = " ".join(texts)
 
