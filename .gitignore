@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .bedrock_agentcore/
 *.log
+.DS_Store
